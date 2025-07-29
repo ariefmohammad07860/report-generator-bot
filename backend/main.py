@@ -8,15 +8,17 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 import os
 import uvicorn
+import requests
 
 # Load environment variables
 load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_OWNER = os.getenv("GITHUB_OWNER")
+GITHUB_REPO = os.getenv("GITHUB_REPO")
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-
-# ✅ Use correct model name here
 model = genai.GenerativeModel("gemini-2.5-pro")
 
 app = FastAPI()
@@ -43,6 +45,38 @@ async def get_response(query: Query):
         user_input = query.message
         response = model.generate_content(user_input)
         return {"response": response.text}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/github-status")
+async def get_latest_github_status():
+    try:
+        headers = {
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/runs?per_page=1"
+        res = requests.get(url, headers=headers)
+
+        if res.status_code != 200:
+            return {
+                "error": f"Failed to fetch: {res.status_code}",
+                "details": res.json()
+            }
+
+        run_data = res.json()
+        runs = run_data.get("workflow_runs", [])
+        if not runs:
+            return {"status": "No workflow runs found."}
+
+        latest_run = runs[0]
+        return {
+            "status": latest_run["conclusion"],
+            "branch": latest_run["head_branch"],
+            "updated_at": latest_run["updated_at"],
+            "html_url": latest_run["html_url"]
+        }
+
     except Exception as e:
         return {"error": str(e)}
 
