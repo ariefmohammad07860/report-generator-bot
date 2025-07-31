@@ -69,7 +69,7 @@ function App() {
   return (
     <>
       <div className="flex h-screen bg-[#0f0f1a] text-white font-sans">
-        {/* <Sidebar /> */}
+        <Sidebar />
         <div className="flex flex-col flex-1 relative">
           <Header messageCount={messages.length} />
           <div className="flex-1 p-6 overflow-y-auto space-y-4 bg-[#1c1c2e]">

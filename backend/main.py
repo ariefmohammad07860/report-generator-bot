@@ -1,5 +1,4 @@
 import ssl
-
 ssl._create_default_https_context = ssl._create_unverified_context
 
 from fastapi import FastAPI
@@ -128,6 +127,18 @@ def is_commit_sha(message: str):
     return re.search(r"\b[0-9a-f]{7,40}\b", message.lower())
 
 
+def get_latest_commits(limit=5):
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits?per_page={limit}"
+    res = requests.get(url, headers=headers)
+    if res.status_code != 200:
+        return None, f"GitHub API error: {res.status_code}"
+    return res.json(), None
+
+
 @app.post("/query")
 async def get_response(query: Query):
     user_input = query.message.strip()
@@ -139,8 +150,16 @@ async def get_response(query: Query):
     }
 
     try:
-        # New: check if user asks about current date or time
-        if any(kw in lowered for kw in ["today", "current date", "current time", "date", "time"]):
+        if lowered in [
+            "what is the date",
+            "what is the current date",
+            "give me current date",
+            "what is the time",
+            "what is the current time",
+            "give me current time",
+            "current date",
+            "current time",
+        ]:
             now = datetime.datetime.now()
             formatted = now.strftime("%Y-%m-%d %H:%M:%S")
             return {"response": f"Current date and time is: {formatted}"}
@@ -177,12 +196,33 @@ async def get_response(query: Query):
                 "response": f"Commit `{commit_sha}` by **{author}** on {date}:\n> {message}"
             }
 
+        if "latest commit" in lowered or "recent commit" in lowered:
+            commits, error = get_latest_commits()
+            if error:
+                return {"response": error}
+            if not commits:
+                return {"response": "No commits found."}
+            lines = []
+            for idx, c in enumerate(commits, 1):
+                sha = c['sha'][:7]
+                author = c['commit']['author']['name']
+                date = c['commit']['author']['date'][:10]
+                message = c['commit']['message'].splitlines()[0]
+                lines.append(
+                    f"{idx}. {message}\n"
+                    f"   • Commit: `{sha}`\n"
+                    f"   • Author: {author}\n"
+                    f"   • Date: {date}"
+                )
+            pretty_output = f"Latest Commits in `{GITHUB_REPO}`:\n\n" + "\n\n".join(lines)
+            return {"response": pretty_output}
+
         if any(k in lowered for k in ["deploy", "release", "feature"]):
             from_date, to_date = extract_date_range(user_input)
             prs = get_merged_prs(from_date, to_date)
             if not prs:
                 return {
-                    "response": f"No deployments between {from_date} and {to_date}."
+                    "response": f"No deployments found between **{from_date}** and **{to_date}** in the `{GITHUB_REPO}` repository."
                 }
             summary = "\n".join(
                 [
@@ -221,7 +261,7 @@ async def get_response(query: Query):
 
 @app.get("/")
 def read_root():
-    return {"message": "AG-UI Backend is Running ✅"}
+    return {"message": "AG-UI Backend is Running"}
 
 
 if __name__ == "__main__":
