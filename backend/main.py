@@ -1,4 +1,5 @@
 import ssl
+
 ssl._create_default_https_context = ssl._create_unverified_context
 
 from fastapi import FastAPI
@@ -9,6 +10,10 @@ import google.generativeai as genai
 import os
 import uvicorn
 import requests
+import datetime
+from dateutil import parser as date_parser
+from dateparser.search import search_dates
+import re
 
 # Load environment variables
 load_dotenv()
@@ -17,13 +22,11 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_OWNER = os.getenv("GITHUB_OWNER")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 
-# Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-pro")
 
 app = FastAPI()
 
-# CORS setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -32,53 +35,194 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class Query(BaseModel):
     message: str
+
+
+def extract_date_range(user_message: str):
+    now = datetime.datetime.now()
+    found_dates = search_dates(user_message, settings={"RELATIVE_BASE": now})
+
+    if found_dates:
+        text, dt = found_dates[0]
+        year = dt.year
+        if "last year" in user_message.lower():
+            return datetime.date(year - 1, 1, 1), datetime.date(year - 1, 12, 31)
+        elif "this year" in user_message.lower():
+            return datetime.date(year, 1, 1), datetime.date(year, 12, 31)
+        else:
+            return dt.date(), dt.date()
+    return now.date() - datetime.timedelta(days=7), now.date()
+
+
+def count_open_github_bugs():
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"https://api.github.com/search/issues?q=repo:{GITHUB_OWNER}/{GITHUB_REPO}+is:issue+is:open+label:bug"
+    res = requests.get(url, headers=headers)
+    if res.status_code != 200:
+        return None, f"GitHub API error: {res.status_code}"
+    return res.json().get("total_count", 0), None
+
+
+def count_commits_between(from_date, to_date):
+    since = datetime.datetime.combine(from_date, datetime.time.min).isoformat() + "Z"
+    until = datetime.datetime.combine(to_date, datetime.time.max).isoformat() + "Z"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = (
+        f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits"
+        f"?since={since}&until={until}&per_page=100"
+    )
+    res = requests.get(url, headers=headers)
+    if res.status_code != 200:
+        return None, f"GitHub API error: {res.status_code}"
+    return len(res.json()), None
+
+
+def get_merged_prs(from_date, to_date):
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/pulls?state=closed&per_page=100"
+    res = requests.get(url, headers=headers)
+    if res.status_code != 200:
+        return []
+    all_prs = res.json()
+    return [
+        pr
+        for pr in all_prs
+        if pr.get("merged_at")
+        and from_date <= date_parser.parse(pr["merged_at"]).date() <= to_date
+    ]
+
+
+def get_open_pull_requests():
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/pulls?state=open&per_page=50"
+    res = requests.get(url, headers=headers)
+    if res.status_code != 200:
+        return []
+    prs = res.json()
+    return [
+        {
+            "number": pr["number"],
+            "title": pr["title"],
+            "user": pr["user"]["login"],
+            "created_at": pr["created_at"],
+        }
+        for pr in prs
+    ]
+
+
+def is_commit_sha(message: str):
+    return re.search(r"\b[0-9a-f]{7,40}\b", message.lower())
+
+
+@app.post("/query")
+async def get_response(query: Query):
+    user_input = query.message.strip()
+    lowered = user_input.lower()
+
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+    try:
+        # New: check if user asks about current date or time
+        if any(kw in lowered for kw in ["today", "current date", "current time", "date", "time"]):
+            now = datetime.datetime.now()
+            formatted = now.strftime("%Y-%m-%d %H:%M:%S")
+            return {"response": f"Current date and time is: {formatted}"}
+
+        if "commit" in lowered and (
+            "yesterday" in lowered
+            or "last" in lowered
+            or re.search(r"\d{4}-\d{2}-\d{2}", lowered)
+        ):
+            from_date, to_date = extract_date_range(user_input)
+            count, error = count_commits_between(from_date, to_date)
+            if error:
+                return {"response": f"Error fetching commits: {error}"}
+            return {
+                "response": f"There were **{count}** commits between **{from_date}** and **{to_date}** in the `{GITHUB_REPO}` repository."
+            }
+
+        sha_match = is_commit_sha(user_input)
+        if sha_match:
+            commit_sha = sha_match.group(0)
+            commit_url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/commits/{commit_sha}"
+            commit_res = requests.get(commit_url, headers=headers)
+            if commit_res.status_code != 200:
+                return {"response": f"Could not find commit `{commit_sha}`."}
+            commit_data = commit_res.json()
+            author = (
+                commit_data.get("commit", {}).get("author", {}).get("name", "Unknown")
+            )
+            date = (
+                commit_data.get("commit", {}).get("author", {}).get("date", "Unknown")
+            )
+            message = commit_data.get("commit", {}).get("message", "No commit message")
+            return {
+                "response": f"Commit `{commit_sha}` by **{author}** on {date}:\n> {message}"
+            }
+
+        if any(k in lowered for k in ["deploy", "release", "feature"]):
+            from_date, to_date = extract_date_range(user_input)
+            prs = get_merged_prs(from_date, to_date)
+            if not prs:
+                return {
+                    "response": f"No deployments between {from_date} and {to_date}."
+                }
+            summary = "\n".join(
+                [
+                    f"- PR #{pr['number']}: {pr['title']} by {pr['user']['login']}"
+                    for pr in prs
+                ]
+            )
+            prompt = f"The user asked: {query.message}\n\nBetween {from_date} and {to_date}, the following pull requests were merged:\n\n{summary}\n\nSummarize from user perspective."
+            response = model.generate_content(prompt)
+            return {"response": response.text}
+
+        if "open pull" in lowered:
+            prs = get_open_pull_requests()
+            if not prs:
+                return {"response": "No open pull requests."}
+            lines = "\n".join(
+                [
+                    f"- #{p['number']} by {p['user']} on {p['created_at'][:10]}"
+                    for p in prs
+                ]
+            )
+            return {"response": f"Open pull requests:\n{lines}"}
+
+        if "bug" in lowered and ("how many" in lowered or "count" in lowered):
+            count, error = count_open_github_bugs()
+            if error:
+                return {"response": f"Error: {error}"}
+            return {"response": f"There are **{count}** open bugs in `{GITHUB_REPO}`."}
+
+        response = model.generate_content(user_input)
+        return {"response": response.text}
+
+    except Exception as e:
+        return {"error": str(e)}
+
 
 @app.get("/")
 def read_root():
     return {"message": "AG-UI Backend is Running ✅"}
 
-@app.post("/query")
-async def get_response(query: Query):
-    try:
-        user_input = query.message
-        response = model.generate_content(user_input)
-        return {"response": response.text}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/github-status")
-async def get_latest_github_status():
-    try:
-        headers = {
-            "Authorization": f"Bearer {GITHUB_TOKEN}",
-            "Accept": "application/vnd.github.v3+json"
-        }
-        url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/runs?per_page=1"
-        res = requests.get(url, headers=headers)
-
-        if res.status_code != 200:
-            return {
-                "error": f"Failed to fetch: {res.status_code}",
-                "details": res.json()
-            }
-
-        run_data = res.json()
-        runs = run_data.get("workflow_runs", [])
-        if not runs:
-            return {"status": "No workflow runs found."}
-
-        latest_run = runs[0]
-        return {
-            "status": latest_run["conclusion"],
-            "branch": latest_run["head_branch"],
-            "updated_at": latest_run["updated_at"],
-            "html_url": latest_run["html_url"]
-        }
-
-    except Exception as e:
-        return {"error": str(e)}
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

@@ -14,7 +14,7 @@ const InputBox = ({ input, setInput, sendMessage }) => {
         />
         <button
           onClick={sendMessage}
-          className=" bg-blue-300 px-4 py-2 rounded-lg text-white font-medium"
+          className=" bg-blue-300 px-4 py-2 rounded-lg text-white font-medium cursor-pointer"
         >
           ➤
         </button>
