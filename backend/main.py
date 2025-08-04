@@ -3,6 +3,8 @@ ssl._create_default_https_context = ssl._create_unverified_context
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -26,6 +28,7 @@ model = genai.GenerativeModel("gemini-2.5-pro")
 
 app = FastAPI()
 
+# Allow frontend to access backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],
@@ -33,6 +36,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve static frontend from 'dist'
+dist_path = os.path.join(os.path.dirname(__file__), "dist")
+app.mount("/assets", StaticFiles(directory=os.path.join(dist_path, "assets")), name="assets")
+
+@app.get("/")
+def serve_index():
+    index_file = os.path.join(dist_path, "index.html")
+    return FileResponse(index_file)
 
 
 class Query(BaseModel):
@@ -257,12 +269,3 @@ async def get_response(query: Query):
 
     except Exception as e:
         return {"error": str(e)}
-
-
-@app.get("/")
-def read_root():
-    return {"message": "AG-UI Backend is Running"}
-
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
