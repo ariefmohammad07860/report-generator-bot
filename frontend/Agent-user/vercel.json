@@ -1,5 +1,17 @@
 {
-  "rewrites": [
-    { "source": "/(.*)", "destination": "/index.html" }
-  ]
+  "projects": {
+    "frontend": {
+      "source": "frontend",
+      "buildCommand": "npm run build",
+      "outputDirectory": "dist"
+    },
+    "backend": {
+      "source": "backend",
+      "functions": {
+        "api/**.py": {
+          "runtime": "python3.9"
+        }
+      }
+    }
+  }
 }
