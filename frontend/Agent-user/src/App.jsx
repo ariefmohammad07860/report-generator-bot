@@ -28,7 +28,7 @@ function App() {
     setIsLoading(true);
 
     try {
-      const response = await fetch("status-bot-3uujrcol2-ariefmohammad07860s-projects.vercel.app/query", {
+      const response = await fetch("https://status-bot-poc.vercel.app/query", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
